@@ -16,3 +16,7 @@ Automatisch script installeren NX Witness en auto update en hulptools:
 3.	chmod +x setup.sh
 4.	./setup.sh
 
+Dit toestel en software wordt beheerd door de firma Stijn Pans BV.
+Voor ondersteuning kan je ons bereiken via:
+• 	📧 support@stijn-pans.be
+• 	☎️ 016 77 08 0
