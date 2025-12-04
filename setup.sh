@@ -43,4 +43,4 @@ echo "Stel grote welkomstbanner met systeeminfo in..."
 # Optioneel: Neofetch automatisch bij login
 echo "neofetch" >> ~/.bashrc
 
-echo "Klaar! Met veel dank aan Vanherwegen Brent die alles voor je gedaan heeft! :) 🎉"
+echo "Klaar! Met veel dank aan Vanherwegen Brent die zonet alles geprogrammeerd heeft voor jou! :) 🎉"
