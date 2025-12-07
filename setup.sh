@@ -176,7 +176,7 @@ systemctl enable --now disk-watchdog.timer
 systemctl enable --now nx-watchdog.timer
 
 echo "=== Installatie voltooid ==="
-echo "Nx Witness geïnstalleerd zoals vroeger."
+echo "Nx Witness geïnstalleerd."
 echo "Schijven stabiel gemount via UUID + LABEL, auto mount bij boot."
 echo "Reboot als alle mounts falen (max 1x per uur)."
 echo "Klaar! Met veel dank aan Vanherwegen Brent die zonet alles geprogrammeerd heeft voor jou! :) 🎉"
