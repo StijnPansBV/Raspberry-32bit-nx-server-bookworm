@@ -2,7 +2,7 @@
 #!/bin/bash
 set -e
 
-VERSION="3.3.0"
+VERSION="1.0.0"
 VERSION_FILE="/var/log/install-version"
 LOGFILE="/var/log/install-script.log"
 SCRIPT_PATH=$(realpath "$0")
