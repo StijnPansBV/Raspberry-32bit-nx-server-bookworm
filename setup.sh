@@ -2,7 +2,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="1.0.1"  # Nieuwe versie
+VERSION="1.0.2"  # Nieuwe scriptversie
 VERSION_FILE="/var/log/install-version"
 LOGFILE="/var/log/install-script.log"
 SCRIPT_PATH=$(realpath "$0")
@@ -28,14 +28,21 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y openssh-server cockpit bpytop unattended-upgrades neofetch figlet wget curl parted e2fsprogs git
 sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive unattended-upgrades
 
-# --- 4. Nx Witness ---
-NX_DEB="nxwitness-server-6.0.6.41837-linux_arm32.deb"
+# --- 4. Nx Witness (nieuwe versie) ---
+NX_DEB="nxwitness-server-6.1.0.41885-linux_arm32-rc.deb"
+NX_URL="https://updates.networkoptix.com/default/41885/arm/$NX_DEB"
+
 if [[ ! -f "$NX_DEB" ]]; then
-    wget -q https://updates.networkoptix.com/default/41837/arm/$NX_DEB
+    echo "Download Nx Witness versie 6.1.0.41885..." | tee -a "$LOGFILE"
+    wget -q "$NX_URL" -O "$NX_DEB"
 fi
+
 if ! dpkg -l | grep -q "networkoptix"; then
+    echo "Installeer Nx Witness..." | tee -a "$LOGFILE"
     sudo DEBIAN_FRONTEND=noninteractive dpkg -i "$NX_DEB" || \
     sudo apt-get install -f -y
+else
+    echo "Nx Witness al geïnstalleerd, overslaan." | tee -a "$LOGFILE"
 fi
 
 # --- 5. Welkomstbanner ---
