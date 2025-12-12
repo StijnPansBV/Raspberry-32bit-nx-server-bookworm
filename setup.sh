@@ -2,34 +2,46 @@
 #!/bin/bash
 set -e
 
-############################################################
-# 0. BASISINSTALLATIE
-############################################################
-echo "Update en upgrade..."
+VERSION="3.3.0"
+VERSION_FILE="/var/log/install-version"
+LOGFILE="/var/log/install-script.log"
+SCRIPT_PATH=$(realpath "$0")
+
+echo "=== Installatiescript versie $VERSION gestart ===" | tee -a "$LOGFILE"
+
+# Versiecheck
+if grep -q "$VERSION" "$VERSION_FILE" 2>/dev/null; then
+    echo "Script al geïnstalleerd (versie $VERSION). Stop." | tee -a "$LOGFILE"
+    exit 0
+fi
+
+# Tijdzone instellen
+echo "Stel tijdzone in op Europe/Brussels..." | tee -a "$LOGFILE"
+sudo timedatectl set-timezone Europe/Brussels
+
+# Basisinstallatie
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y openssh-server cockpit bpytop unattended-upgrades neofetch figlet wget curl parted e2fsprogs
+sudo apt install -y openssh-server cockpit bpytop unattended-upgrades neofetch figlet wget curl parted e2fsprogs git
+sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive unattended-upgrades
 
-echo "Configureer unattended-upgrades..."
-sudo dpkg-reconfigure unattended-upgrades
+# Nx Witness installeren
+NX_DEB="nxwitness-server-6.0.6.41837-linux_arm32.deb"
+if [ ! -f "$NX_DEB" ]; then
+    wget https://updates.networkoptix.com/default/41837/arm/$NX_DEB
+fi
+sudo dpkg -i $NX_DEB || sudo apt-get install -f -y
 
-echo "Download en installeer Nx Witness (vaste versie zoals vroeger)..."
-wget https://updates.networkoptix.com/default/41837/arm/nxwitness-server-6.0.6.41837-linux_arm32.deb
-sudo dpkg -i nxwitness-server-6.0.6.41837-linux_arm32.deb || sudo apt install -f -y
-
-echo "Welkomstbanner instellen..."
+# Welkomstbanner
 {
   figlet "Welkom Stijn Pans BV"
   echo "OS: $(lsb_release -d | cut -f2)"
   echo "Kernel: $(uname -r)"
   echo "Host: $(hostname)"
 } | sudo tee /etc/motd
-echo "neofetch" >> ~/.bashrc
+grep -q "neofetch" ~/.bashrc || echo "neofetch" >> ~/.bashrc
 
-############################################################
-# 1. DISK WATCHDOG MET UUID + LABEL + MOUNT FIX + REBOOT
-############################################################
+# Disk watchdog script
 mkdir -p /usr/local/bin /var/log /mnt/media
-
 cat << 'EOF' > /usr/local/bin/disk-watchdog.sh
 #!/bin/bash
 LOGFILE="/var/log/disk-watchdog.log"
@@ -49,9 +61,6 @@ done
 IFS=$'\n' DISKS=($(sort <<<"${DISKS[*]}"))
 unset IFS
 
-# Oude fstab regels verwijderen
-sed -i '/\/mnt\/media\//d' /etc/fstab
-
 INDEX=1
 SUCCESS=0
 for DISK in "${DISKS[@]}"; do
@@ -59,9 +68,7 @@ for DISK in "${DISKS[@]}"; do
     LABEL="MEDIA_${INDEX}"
     MOUNTPOINT="$BASE/$LABEL"
 
-    # Partitie aanmaken indien nodig
     if [ ! -e "$PART" ]; then
-        echo "$(date): $DISK geen partitie → aanmaken" >> "$LOGFILE"
         parted "$DISK" --script mklabel gpt
         parted "$DISK" --script mkpart primary 0% 100%
         sleep 3
@@ -69,114 +76,121 @@ for DISK in "${DISKS[@]}"; do
         sleep 2
     fi
 
-    # Label instellen
     e2label "$PART" "$LABEL"
-
-    # UUID ophalen
     UUID=$(blkid -s UUID -o value "$PART")
-
     mkdir -p "$MOUNTPOINT"
 
-    # fstab regel toevoegen met auto mount bij boot
-    if ! grep -q "$UUID" /etc/fstab; then
-        echo "UUID=$UUID $MOUNTPOINT ext4 defaults,nofail,auto 0 0" >> /etc/fstab
-        echo "$(date): fstab toegevoegd: $LABEL ($UUID)" >> "$LOGFILE"
-        mount -a
-    fi
-
-    # Mounten (herstel als unmount)
-    if ! mountpoint -q "$MOUNTPOINT"; then
-        if mount "$MOUNTPOINT"; then
-            SUCCESS=$((SUCCESS+1))
-        else
-            echo "$(date): MOUNT FAALDE voor $LABEL" >> "$LOGFILE"
-        fi
+    LINE="UUID=$UUID $MOUNTPOINT ext4 defaults,nofail,auto 0 0"
+    if grep -q "$MOUNTPOINT" /etc/fstab; then
+        sed -i "\|$MOUNTPOINT|c\\$LINE" /etc/fstab
     else
-        SUCCESS=$((SUCCESS+1))
+        echo "$LINE" >> /etc/fstab
     fi
 
+    mount "$MOUNTPOINT" && SUCCESS=$((SUCCESS+1))
     INDEX=$((INDEX+1))
 done
 
-# Als geen enkele schijf gemount is → reboot max 1x per uur
 if [ $SUCCESS -eq 0 ]; then
     NOW=$(date +%s)
     if [ ! -f "$LAST_REBOOT_FILE" ] || [ $((NOW - $(cat $LAST_REBOOT_FILE))) -ge 3600 ]; then
-        echo "$(date): Geen enkele schijf gemount → herstarten" >> "$LOGFILE"
         echo "$NOW" > "$LAST_REBOOT_FILE"
         sudo reboot
-    else
-        echo "$(date): Geen schijven gemount, maar reboot al uitgevoerd in afgelopen uur" >> "$LOGFILE"
     fi
 fi
 EOF
-
 chmod +x /usr/local/bin/disk-watchdog.sh
 
-############################################################
-# 2. NX WATCHDOG
-############################################################
+# NX watchdog script
 cat << 'EOF' > /usr/local/bin/nx-watchdog.sh
 #!/bin/bash
 LOGFILE="/var/log/nx-watchdog.log"
 echo "$(date): NX Watchdog gestart" >> "$LOGFILE"
 if ! systemctl is-active --quiet networkoptix-mediaserver.service; then
-    echo "$(date): Nx Server draait niet → herstarten" >> "$LOGFILE"
     systemctl restart networkoptix-mediaserver.service
-else
-    echo "$(date): Nx Server OK" >> "$LOGFILE"
 fi
 EOF
-
 chmod +x /usr/local/bin/nx-watchdog.sh
 
-############################################################
-# 3. SYSTEMD SERVICES + TIMERS
-############################################################
-# Disk watchdog
-cat << 'EOF' > /etc/systemd/system/disk-watchdog.service
-[Unit]
-Description=Disk Watchdog Service
+# Systemd services en timers voor watchdogs
+for svc in disk-watchdog nx-watchdog; do
+    echo "[Unit]
+Description=$svc Service
 [Service]
-ExecStart=/usr/local/bin/disk-watchdog.sh
-Type=oneshot
-EOF
+ExecStart=/usr/local/bin/$svc.sh
+Type=oneshot" > "/etc/systemd/system/$svc.service"
 
-cat << 'EOF' > /etc/systemd/system/disk-watchdog.timer
-[Unit]
-Description=Run Disk Watchdog every 30 seconds
+    echo "[Unit]
+Description=Run $svc every 30 seconds
 [Timer]
 OnBootSec=15
 OnUnitActiveSec=30
 [Install]
-WantedBy=timers.target
-EOF
-
-# NX watchdog
-cat << 'EOF' > /etc/systemd/system/nx-watchdog.service
-[Unit]
-Description=NX Server Watchdog
-[Service]
-ExecStart=/usr/local/bin/nx-watchdog.sh
-Type=oneshot
-EOF
-
-cat << 'EOF' > /etc/systemd/system/nx-watchdog.timer
-[Unit]
-Description=Run NX Watchdog every 30 seconds
-[Timer]
-OnBootSec=20
-OnUnitActiveSec=30
-[Install]
-WantedBy=timers.target
-EOF
+WantedBy=timers.target" > "/etc/systemd/system/$svc.timer"
+done
 
 systemctl daemon-reload
 systemctl enable --now disk-watchdog.timer
 systemctl enable --now nx-watchdog.timer
 
-echo "=== Installatie voltooid ==="
-echo "Nx Witness geïnstalleerd."
-echo "Schijven stabiel gemount via UUID + LABEL, auto mount bij boot."
-echo "Reboot als alle mounts falen (max 1x per uur)."
-echo "Klaar! Met veel dank aan Vanherwegen Brent die zonet alles geprogrammeerd heeft voor jou! :) 🎉"
+# Auto-update script
+cat << 'EOF' > /opt/update.sh
+#!/bin/bash
+LOGFILE="/var/log/update.log"
+REPO_DIR="/opt/Raspberry-32bit-nx-server-bookworm"
+
+echo "$(date): Update-check gestart" >> "$LOGFILE"
+
+if [ ! -d "$REPO_DIR" ]; then
+    git clone https://github.com/StijnPansBV/Raspberry-32bit-nx-server-bookworm.git "$REPO_DIR"
+fi
+
+cd "$REPO_DIR"
+git fetch origin
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/main)
+
+if [ "$LOCAL" != "$REMOTE" ]; then
+    echo "$(date): Nieuwe versie gevonden, update uitvoeren..." >> "$LOGFILE"
+    git pull
+    chmod +x setup.sh
+    sudo ./setup.sh
+    echo "$(date): Update voltooid" >> "$LOGFILE"
+else
+    echo "$(date): Geen update nodig" >> "$LOGFILE"
+fi
+EOF
+chmod +x /opt/update.sh
+
+# Systemd service en timer voor update (elke 15 minuten)
+cat << EOF > /etc/systemd/system/github-update.service
+[Unit]
+Description=GitHub Auto Update Service
+After=network.target
+
+[Service]
+ExecStart=/opt/update.sh
+Type=oneshot
+EOF
+
+cat << EOF > /etc/systemd/system/github-update.timer
+[Unit]
+Description=GitHub Auto Update Timer
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=900   # 15 minuten
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now github-update.timer
+
+# Versie opslaan en script verwijderen
+echo "$VERSION" > "$VERSION_FILE"
+rm -f "$SCRIPT_PATH"
+
+# Automatische reboot
+echo "Installatie voltooid. Systeem wordt herstart..." | tee -a "$LOGFILE"
+sudo reboot
