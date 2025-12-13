@@ -1,66 +1,79 @@
 
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.0.2"  # Nieuwe scriptversie
-VERSION_FILE="/var/log/install-version"
-LOGFILE="/var/log/install-script.log"
-SCRIPT_PATH=$(realpath "$0")
+# ===========================
+# Raspberry Pi NX Server Installatiescript
+# Versie: 2.0.0
+# ===========================
+SCRIPT_VERSION="2.0.0"
+SELF_URL="https://raw.githubusercontent.com/StijnPansBV/Raspberry-32bit-nx-server-bookworm/main/setup.sh"
+NX_DEB="nxwitness-server-6.1.0.42176-linux_arm32.deb"
+NX_URL="https://updates.networkoptix.com/default/42176/arm/$NX_DEB"
+LOGFILE="/var/log/nx-install.log"
+LOCKFILE="/var/lock/install-script.lock"
 
-echo "=== Installatiescript versie $VERSION gestart ===" | tee -a "$LOGFILE"
+touch "$LOGFILE"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Script draait al." >> "$LOGFILE"; exit 0; }
 
-# --- 1. Versiecheck ---
-if [[ -f "$VERSION_FILE" ]] && grep -q "$VERSION" "$VERSION_FILE"; then
-    echo "Script al geïnstalleerd (versie $VERSION). Stop." | tee -a "$LOGFILE"
-    exit 0
+trap 'echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] Installatiescript faalde." >> "$LOGFILE"' ERR
+
+# Self-update
+REMOTE_VERSION=$(curl -s "$SELF_URL" | grep 'SCRIPT_VERSION=' | cut -d'"' -f2 || echo "$SCRIPT_VERSION")
+if [ "$REMOTE_VERSION" != "$SCRIPT_VERSION" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Nieuwe versie gevonden ($REMOTE_VERSION). Download en voer uit..." >> "$LOGFILE"
+    curl -s -o /tmp/setup.sh "$SELF_URL"
+    chmod +x /tmp/setup.sh
+    exec /tmp/setup.sh --updated
 fi
 
-# --- 2. Tijdzone ---
-CURRENT_TZ=$(timedatectl show -p Timezone --value)
-if [[ "$CURRENT_TZ" != "Europe/Brussels" ]]; then
-    echo "Stel tijdzone in op Europe/Brussels..." | tee -a "$LOGFILE"
-    sudo timedatectl set-timezone Europe/Brussels
-fi
+echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Start installatie v$SCRIPT_VERSION" >> "$LOGFILE"
 
-# --- 3. Updates & pakketten ---
-echo "Update en upgrade..." | tee -a "$LOGFILE"
+############################################################
+# 0. BASISINSTALLATIE
+############################################################
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y openssh-server cockpit bpytop unattended-upgrades neofetch figlet wget curl parted e2fsprogs git
-sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive unattended-upgrades
+PACKAGES=(openssh-server cockpit bpytop unattended-upgrades neofetch figlet wget curl parted e2fsprogs git)
+for pkg in "${PACKAGES[@]}"; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+        sudo DEBIAN_FRONTEND=noninteractive apt install -y "$pkg"
+    fi
+done
+sudo dpkg-reconfigure -f noninteractive unattended-upgrades
 
-# --- 4. Nx Witness (nieuwe versie) ---
-NX_DEB="nxwitness-server-6.1.0.41885-linux_arm32-rc.deb"
-NX_URL="https://updates.networkoptix.com/default/41885/arm/$NX_DEB"
-
-if [[ ! -f "$NX_DEB" ]]; then
-    echo "Download Nx Witness versie 6.1.0.41885..." | tee -a "$LOGFILE"
-    wget -q "$NX_URL" -O "$NX_DEB"
+############################################################
+# 1. NX WITNESS INSTALLATIE
+############################################################
+if ! dpkg -s networkoptix-mediaserver &>/dev/null; then
+    if [ ! -f "$NX_DEB" ]; then
+        wget "$NX_URL"
+    fi
+    sudo DEBIAN_FRONTEND=noninteractive dpkg -i "$NX_DEB" || sudo apt install -f -y
 fi
 
-if ! dpkg -l | grep -q "networkoptix"; then
-    echo "Installeer Nx Witness..." | tee -a "$LOGFILE"
-    sudo DEBIAN_FRONTEND=noninteractive dpkg -i "$NX_DEB" || \
-    sudo apt-get install -f -y
-else
-    echo "Nx Witness al geïnstalleerd, overslaan." | tee -a "$LOGFILE"
-fi
-
-# --- 5. Welkomstbanner ---
+############################################################
+# 2. WELKOMSTBANNER
+############################################################
 MOTD_FILE="/etc/motd"
-{
-  figlet "Welkom Stijn Pans BV"
-  echo "OS: $(lsb_release -d | cut -f2)"
-  echo "Kernel: $(uname -r)"
-  echo "Host: $(hostname)"
-} | sudo tee "$MOTD_FILE" > /dev/null
+if ! grep -q "Welkom Stijn Pans BV" "$MOTD_FILE" 2>/dev/null; then
+    {
+      figlet "Welkom Stijn Pans BV"
+      echo "OS: $(lsb_release -d | cut -f2)"
+      echo "Kernel: $(uname -r)"
+      echo "Host: $(hostname)"
+    } | sudo tee "$MOTD_FILE"
+fi
+grep -qxF "neofetch" ~/.bashrc || echo "neofetch" >> ~/.bashrc
 
-grep -q "neofetch" ~/.bashrc || echo "neofetch" >> ~/.bashrc
-
-# --- 6. Disk Watchdog ---
+############################################################
+# 3. DISK WATCHDOG
+############################################################
 DISK_SCRIPT="/usr/local/bin/disk-watchdog.sh"
-mkdir -p /usr/local/bin /var/log /mnt/media
-cat << 'EOF' > "$DISK_SCRIPT"
-#!/bin/bash
+if [ ! -f "$DISK_SCRIPT" ]; then
+cat << 'EOF' | sudo tee "$DISK_SCRIPT"
+#!/usr/bin/env bash
+set -euo pipefail
 LOGFILE="/var/log/disk-watchdog.log"
 BASE="/mnt/media"
 LAST_REBOOT_FILE="/var/log/last_disk_reboot"
@@ -72,11 +85,13 @@ ALL_DISKS=($(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}'))
 
 DISKS=()
 for D in "${ALL_DISKS[@]}"; do
-    [[ "$D" != "$OS_DISK" ]] && DISKS+=("$D")
+    [ "$D" != "$OS_DISK" ] && DISKS+=("$D")
 done
 
 IFS=$'\n' DISKS=($(sort <<<"${DISKS[*]}"))
 unset IFS
+
+sed -i '/\/mnt\/media\//d' /etc/fstab
 
 INDEX=1
 SUCCESS=0
@@ -85,7 +100,7 @@ for DISK in "${DISKS[@]}"; do
     LABEL="MEDIA_${INDEX}"
     MOUNTPOINT="$BASE/$LABEL"
 
-    if [[ ! -e "$PART" ]]; then
+    if [ ! -e "$PART" ]; then
         parted "$DISK" --script mklabel gpt
         parted "$DISK" --script mkpart primary 0% 100%
         sleep 3
@@ -97,125 +112,134 @@ for DISK in "${DISKS[@]}"; do
     UUID=$(blkid -s UUID -o value "$PART")
     mkdir -p "$MOUNTPOINT"
 
-    LINE="UUID=$UUID $MOUNTPOINT ext4 defaults,nofail,auto 0 0"
-    if grep -q "$MOUNTPOINT" /etc/fstab; then
-        sed -i "\|$MOUNTPOINT|c\\$LINE" /etc/fstab
-    else
-        echo "$LINE" >> /etc/fstab
+    if ! grep -q "$UUID" /etc/fstab; then
+        echo "UUID=$UUID $MOUNTPOINT ext4 defaults,nofail,auto 0 0" >> /etc/fstab
+        mount -a
     fi
 
-    mount "$MOUNTPOINT" && SUCCESS=$((SUCCESS+1))
+    if ! mountpoint -q "$MOUNTPOINT"; then
+        mount "$MOUNTPOINT" && SUCCESS=$((SUCCESS+1))
+    else
+        SUCCESS=$((SUCCESS+1))
+    fi
+
     INDEX=$((INDEX+1))
 done
 
-if [[ $SUCCESS -eq 0 ]]; then
+if [ $SUCCESS -eq 0 ]; then
     NOW=$(date +%s)
-    if [[ ! -f "$LAST_REBOOT_FILE" ]] || [[ $((NOW - $(cat $LAST_REBOOT_FILE))) -ge 3600 ]]; then
+    if [ ! -f "$LAST_REBOOT_FILE" ] || [ $((NOW - $(cat $LAST_REBOOT_FILE))) -ge 3600 ]; then
         echo "$NOW" > "$LAST_REBOOT_FILE"
         sudo reboot
     fi
 fi
 EOF
-chmod +x "$DISK_SCRIPT"
+sudo chmod +x "$DISK_SCRIPT"
+fi
 
-# --- 7. NX Watchdog ---
+############################################################
+# 4. NX WATCHDOG
+############################################################
 NX_SCRIPT="/usr/local/bin/nx-watchdog.sh"
-cat << 'EOF' > "$NX_SCRIPT"
-#!/bin/bash
+if [ ! -f "$NX_SCRIPT" ]; then
+cat << 'EOF' | sudo tee "$NX_SCRIPT"
+#!/usr/bin/env bash
+set -euo pipefail
 LOGFILE="/var/log/nx-watchdog.log"
 echo "$(date): NX Watchdog gestart" >> "$LOGFILE"
 if ! systemctl is-active --quiet networkoptix-mediaserver.service; then
-    systemctl restart networkoptix-mediaserver.service
+    systemctl restart --no-block networkoptix-mediaserver.service
 fi
 EOF
-chmod +x "$NX_SCRIPT"
+sudo chmod +x "$NX_SCRIPT"
+fi
 
-# --- 8. Systemd services ---
-for svc in disk-watchdog nx-watchdog; do
-    SERVICE_FILE="/etc/systemd/system/$svc.service"
-    TIMER_FILE="/etc/systemd/system/$svc.timer"
-
-    cat << EOF > "$SERVICE_FILE"
+############################################################
+# 5. SYSTEMD TIMERS
+############################################################
+create_service() {
+    local name="$1"
+    local exec="$2"
+    local timer="$3"
+    local bootsec="$4"
+    if [ ! -f "/etc/systemd/system/$name.service" ]; then
+        cat <<EOF | sudo tee "/etc/systemd/system/$name.service"
 [Unit]
-Description=$svc Service
+Description=$name Service
 [Service]
-ExecStart=/usr/local/bin/$svc.sh
+ExecStart=$exec
 Type=oneshot
 EOF
-
-    cat << EOF > "$TIMER_FILE"
+    fi
+    if [ ! -f "/etc/systemd/system/$name.timer" ]; then
+        cat <<EOF | sudo tee "/etc/systemd/system/$name.timer"
 [Unit]
-Description=Run $svc every 30 seconds
+Description=Run $name every $timer
 [Timer]
-OnBootSec=15
-OnUnitActiveSec=30
+OnBootSec=$bootsec
+OnUnitActiveSec=$timer
+Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-done
+    fi
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now "$name.timer"
+}
 
-systemctl daemon-reload
-systemctl enable disk-watchdog.timer nx-watchdog.timer
+create_service "disk-watchdog" "$DISK_SCRIPT" "60" "15"
+create_service "nx-watchdog" "$NX_SCRIPT" "60" "20"
 
-# --- 9. Auto-update ---
-UPDATE_SCRIPT="/opt/update.sh"
-cat << 'EOF' > "$UPDATE_SCRIPT"
-#!/bin/bash
-LOGFILE="/var/log/update.log"
-REPO_DIR="/opt/Raspberry-32bit-nx-server-bookworm"
-
-echo "$(date): Update-check gestart" >> "$LOGFILE"
-
-if [[ ! -d "$REPO_DIR" ]]; then
-    git clone https://github.com/StijnPansBV/Raspberry-32bit-nx-server-bookworm.git "$REPO_DIR"
-fi
-
-cd "$REPO_DIR"
-git fetch origin
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
-
-echo "$(date): Lokale commit: $LOCAL, Remote commit: $REMOTE" >> "$LOGFILE"
-
-if [[ "$LOCAL" != "$REMOTE" ]]; then
-    echo "$(date): Nieuwe versie gevonden, update uitvoeren..." >> "$LOGFILE"
-    git pull
-    chmod +x setup.sh
-    sudo ./setup.sh
-    echo "$(date): Update voltooid" >> "$LOGFILE"
+############################################################
+# 6. AUTO-UPDATE TIMER
+############################################################
+UPDATE_SCRIPT="/usr/local/bin/update.sh"
+cat << 'EOF' | sudo tee "$UPDATE_SCRIPT"
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_URL="https://raw.githubusercontent.com/StijnPansBV/Raspberry-32bit-nx-server-bookworm/main/setup.sh"
+LOCAL_SCRIPT="/usr/local/bin/setup.sh"
+LOGFILE="/var/log/nx-update.log"
+LOCKFILE="/var/lock/nx-update.lock"
+touch "$LOGFILE"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Update-script draait al." >> "$LOGFILE"; exit 0; }
+trap 'echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] Update-script faalde." >> "$LOGFILE"' ERR
+REMOTE_VERSION=$(curl -s "$SELF_URL" | grep 'SCRIPT_VERSION=' | cut -d'"' -f2 || echo "unknown")
+LOCAL_VERSION=$(grep 'SCRIPT_VERSION=' "$LOCAL_SCRIPT" | cut -d'"' -f2 || echo "unknown")
+echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Lokale versie: $LOCAL_VERSION | Remote versie: $REMOTE_VERSION" >> "$LOGFILE"
+if [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
+    cp "$LOCAL_SCRIPT" "${LOCAL_SCRIPT}.bak"
+    curl -s -o "$LOCAL_SCRIPT" "$SELF_URL"
+    chmod +x "$LOCAL_SCRIPT"
+    exec "$LOCAL_SCRIPT" --updated
 else
-    echo "$(date): Geen update nodig" >> "$LOGFILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Geen update beschikbaar." >> "$LOGFILE"
 fi
 EOF
-chmod +x "$UPDATE_SCRIPT"
+sudo chmod +x "$UPDATE_SCRIPT"
 
-# --- 10. Systemd voor update ---
-cat << EOF > /etc/systemd/system/github-update.service
+cat <<EOF | sudo tee /etc/systemd/system/nx-auto-update.service
 [Unit]
-Description=GitHub Auto Update Service
-After=network.target
+Description=NX Server Auto Update Service
 [Service]
-ExecStart=/opt/update.sh
+ExecStart=$UPDATE_SCRIPT
 Type=oneshot
 EOF
 
-cat << EOF > /etc/systemd/system/github-update.timer
+cat <<EOF | sudo tee /etc/systemd/system/nx-auto-update.timer
 [Unit]
-Description=GitHub Auto Update Timer
+Description=Run NX Server Auto Update every 15 minutes
 [Timer]
-OnBootSec=60
-OnUnitActiveSec=3600
+OnBootSec=30
+OnUnitActiveSec=15min
+Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
 
-systemctl daemon-reload
-systemctl enable github-update.timer || true
+sudo systemctl daemon-reload
+sudo systemctl enable --now nx-auto-update.timer
 
-# --- 11. Versie opslaan en cleanup ---
-echo "$VERSION" > "$VERSION_FILE"
-rm -f "$SCRIPT_PATH"
-
-echo "Installatie voltooid. Systeem wordt herstart..." | tee -a "$LOGFILE"
+echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Installatie voltooid (v$SCRIPT_VERSION)" >> "$LOGFILE"
 sudo reboot
-
